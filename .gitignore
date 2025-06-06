@@ -1,8 +1,8 @@
 # 忽略 ./data 目录下的所有内容
-./data/*
+data/**
 
 # 忽略 ./checkpoints 目录下的所有内容
-./checkpoints/*
+checkpoints/
 
 # 忽略所有 .pth 权重文件（无论位于哪个目录）
 *.pth
