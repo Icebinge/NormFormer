@@ -1,0 +1,42 @@
+# 忽略 ./data 目录下的所有内容
+./data/*
+
+# 忽略 ./checkpoints 目录下的所有内容
+./checkpoints/*
+
+# 忽略所有 .pth 权重文件（无论位于哪个目录）
+*.pth
+
+# 忽略所有 .pt 权重文件（PyTorch 另一种常见格式）
+*.pt
+
+# 忽略所有 .h5 权重文件（Keras/TensorFlow 常见格式）
+*.h5
+
+# 忽略所有 .ckpt 权重文件（TensorFlow 另一种常见格式）
+*.ckpt
+
+# 忽略所有 .bin 权重文件（HuggingFace Transformers 常见格式）
+*.bin
+
+# 忽略 Python 缓存文件和虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+venv/
+env/
+.venv/
+
+# 忽略 IDE 特定文件
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 忽略日志文件
+*.log
+
+# 忽略 Jupyter Notebook 检查点
+.ipynb_checkpoints/
