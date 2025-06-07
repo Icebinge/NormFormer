@@ -9,6 +9,7 @@ import time
 import os
 from torch.cuda.amp import GradScaler, autocast
 from normformer import EncoderLayer
+from normActive import RowNormActivation
 
 class Config:
     """集中管理所有超参数"""
@@ -56,7 +57,8 @@ class SimpleTransformerNet(nn.Module):
         
         # 分类头
         self.classifier = nn.Sequential(
-            nn.LayerNorm(config.d_model),
+            # nn.LayerNorm(config.d_model),
+            RowNormActivation(),
             nn.Linear(config.d_model, config.d_model),
             nn.GELU(),
             nn.Dropout(config.dropout),
@@ -103,6 +105,9 @@ class Trainer:
         
         # 初始化模型
         self.model = SimpleTransformerNet(config).to(self.device)
+        
+        # 打印模型结构
+        self.print_model_summary()
         
         # 优化器和损失函数
         self.criterion = nn.CrossEntropyLoss()
@@ -169,6 +174,18 @@ class Trainer:
             num_workers=self.config.num_workers,
             pin_memory=True
         )
+    
+    def print_model_summary(self):
+        """打印模型结构"""
+        try:
+            from torchinfo import summary
+            print("\nDetailed Model Summary:")
+            summary(self.model, 
+                    input_size=(self.config.batch_size, 1, 28, 28),
+                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
+                    verbose=1)
+        except ImportError:
+            print("torchinfo not installed, install with: pip install torchinfo")
     
     def train_epoch(self, epoch):
         """训练一个epoch"""
@@ -332,6 +349,7 @@ def main():
     config = Config()
     trainer = Trainer(config)
     history = trainer.train()
+    # trainer.print_model_summary()
 
 if __name__ == '__main__':
     main()

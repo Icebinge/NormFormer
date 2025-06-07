@@ -22,7 +22,7 @@ class Config:
     
     # 训练参数
     batch_size = 128
-    num_epochs = 10
+    num_epochs = 100
     learning_rate = 0.001
     weight_decay = 1e-4
     max_grad_norm = 1.0
@@ -126,19 +126,54 @@ class OriginalTransformerNet(nn.Module):
         # 分类
         return self.classifier(x)
 
+    def print_model_summary(self):
+        """打印模型结构"""
+        try:
+            from torchinfo import summary
+            print("\nDetailed Model Summary:")
+            summary(self, 
+                    input_size=(self.config.batch_size, 1, 28, 28),
+                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
+                    verbose=1)
+        except ImportError:
+            print("torchinfo 未安装，请使用: pip install torchinfo")
+
 class Trainer:
     def __init__(self, config, device=None):
         self.config = config
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._setup()
-    
-    def _setup(self):
-        """初始化训练环境"""
+        
+        # 设置随机种子
         self._set_seed()
+        
+        # 准备数据
         self._prepare_data()
-        self._init_model()
-        self._init_optimizer()
-        os.makedirs(self.config.save_dir, exist_ok=True)
+        
+        # 初始化模型
+        self.model = OriginalTransformerNet(config).to(self.device)
+        
+        # 打印模型结构
+        self.print_model_summary()
+        
+        # 优化器和损失函数
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.AdamW(
+            self.model.parameters(), 
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay
+        )
+        
+        # 学习率调度器
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, 
+            T_max=config.num_epochs
+        )
+        
+        # 混合精度训练
+        self.scaler = GradScaler(enabled=self.config.use_amp)
+        
+        # 创建保存目录
+        os.makedirs(config.save_dir, exist_ok=True)
     
     def _set_seed(self):
         """设置随机种子"""
@@ -186,23 +221,17 @@ class Trainer:
             pin_memory=True
         )
     
-    def _init_model(self):
-        """初始化模型"""
-        self.model = OriginalTransformerNet(self.config).to(self.device)
-        self.criterion = nn.CrossEntropyLoss()
-        self.scaler = GradScaler(enabled=self.config.use_amp)
-    
-    def _init_optimizer(self):
-        """初始化优化器和学习率调度器"""
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay
-        )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=self.config.num_epochs
-        )
+    def print_model_summary(self):
+        """打印模型结构"""
+        try:
+            from torchinfo import summary
+            print("\nDetailed Model Summary:")
+            summary(self.model, 
+                    input_size=(self.config.batch_size, 1, 28, 28),
+                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
+                    verbose=1)
+        except ImportError:
+            print("torchinfo 未安装，请使用: pip install torchinfo")
     
     def train_epoch(self, epoch):
         """训练一个epoch"""
