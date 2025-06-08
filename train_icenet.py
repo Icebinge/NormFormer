@@ -7,136 +7,35 @@ import time
 import numpy as np
 from tqdm import tqdm
 import os
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
+import math
+import yaml
+from dataclasses import dataclass
+from typing import Dict, Any
+from datasets.mnist_dataset import MNISTDataset
+from models.norm_transformer import SimpleTransformerNet
 
+@dataclass
 class Config:
-    """配置参数"""
-    # 模型参数
-    num_classes = 10
-    d_model = 256
-    num_heads = 8
-    num_layers = 4
-    d_ff = 1024
-    dropout = 0.1
-    patch_size = 7  # 28x28图像分成4x4的块
+    """配置参数类"""
+    model: Dict[str, Any]
+    training: Dict[str, Any]
+    system: Dict[str, Any]
+    save: Dict[str, Any]
     
-    # 训练参数
-    batch_size = 128
-    num_epochs = 100
-    learning_rate = 0.001
-    weight_decay = 1e-4
-    max_grad_norm = 1.0
-    train_ratio = 0.9  # 训练集占比
+    @classmethod
+    def from_yaml(cls, yaml_path: str) -> 'Config':
+        """从YAML文件加载配置"""
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            config_dict = yaml.safe_load(f)
+        return cls(**config_dict)
     
-    # 系统参数
-    seed = 42
-    num_workers = 4
-    use_amp = True  # 使用混合精度训练
-    save_dir = "original_checkpoints"
-    model_name = "original_transformer_mnist"
-
-class OriginalTransformerBlock(nn.Module):
-    def __init__(self, config):
-        super(OriginalTransformerBlock, self).__init__()
-        self.self_attn = nn.MultiheadAttention(
-            config.d_model, 
-            config.num_heads, 
-            dropout=config.dropout
-        )
-        self.feed_forward = nn.Sequential(
-            nn.Linear(config.d_model, config.d_ff),
-            nn.GELU(),  # 使用GELU代替ReLU
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_ff, config.d_model)
-        )
-        self.norm1 = nn.LayerNorm(config.d_model)
-        self.norm2 = nn.LayerNorm(config.d_model)
-        self.dropout = nn.Dropout(config.dropout)
-        
-    def forward(self, x):
-        # Self attention
-        attn_output, _ = self.self_attn(x, x, x)
-        x = self.norm1(x + self.dropout(attn_output))
-        
-        # Feed forward
-        ff_output = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ff_output))
-        
-        return x
-
-class OriginalTransformerNet(nn.Module):
-    def __init__(self, config):
-        super(OriginalTransformerNet, self).__init__()
-        self.config = config
-        
-        # 图像预处理层
-        self.patch_embed = nn.Conv2d(
-            1, config.d_model, 
-            kernel_size=config.patch_size, 
-            stride=config.patch_size
-        )
-        
-        # 位置编码
-        num_patches = (28 // config.patch_size) ** 2
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, config.d_model))
-        
-        # Transformer编码器层
-        self.transformer_blocks = nn.ModuleList([
-            OriginalTransformerBlock(config) for _ in range(config.num_layers)
-        ])
-        
-        # 分类头
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(config.d_model),
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_model, config.num_classes)
-        )
-        
-        self._init_weights()
-    
-    def _init_weights(self):
-        """初始化权重"""
-        nn.init.xavier_uniform_(self.patch_embed.weight)
-        nn.init.normal_(self.pos_embed, std=0.02)
-        
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-    
-    def forward(self, x):
-        # 输入 x: (batch_size, 1, 28, 28)
-        batch_size = x.shape[0]
-        
-        # 图像分块
-        x = self.patch_embed(x)  # (batch_size, d_model, 4, 4)
-        x = x.flatten(2).transpose(1, 2)  # (batch_size, num_patches, d_model)
-        
-        # 添加位置编码
-        x = x + self.pos_embed
-        
-        # 通过Transformer编码器层
-        for block in self.transformer_blocks:
-            x = block(x)
-        
-        # 全局平均池化
-        x = x.mean(dim=1)
-        
-        # 分类
-        return self.classifier(x)
-
-    def print_model_summary(self):
-        """打印模型结构"""
-        try:
-            from torchinfo import summary
-            print("\nDetailed Model Summary:")
-            summary(self, 
-                    input_size=(self.config.batch_size, 1, 28, 28),
-                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
-                    verbose=1)
-        except ImportError:
-            print("torchinfo 未安装，请使用: pip install torchinfo")
+    def __getattr__(self, name: str) -> Any:
+        """允许直接访问配置项"""
+        for section in [self.model, self.training, self.system, self.save]:
+            if name in section:
+                return section[name]
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 class Trainer:
     def __init__(self, config, device=None):
@@ -147,10 +46,14 @@ class Trainer:
         self._set_seed()
         
         # 准备数据
-        self._prepare_data()
+        data_loader = MNISTDataset(config)
+        loaders = data_loader.get_data_loaders()
+        self.train_loader = loaders['train']
+        self.val_loader = loaders['val']
+        self.test_loader = loaders['test']
         
         # 初始化模型
-        self.model = OriginalTransformerNet(config).to(self.device)
+        self.model = SimpleTransformerNet(config).to(self.device)
         
         # 打印模型结构
         self.print_model_summary()
@@ -174,7 +77,9 @@ class Trainer:
         
         # 创建保存目录
         os.makedirs(config.save_dir, exist_ok=True)
-    
+        
+        print(f"当前设备: {self.device}")
+        
     def _set_seed(self):
         """设置随机种子"""
         torch.manual_seed(self.config.seed)
@@ -182,56 +87,9 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.config.seed)
     
-    def _prepare_data(self):
-        """准备数据加载器"""
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,))
-        ])
-        
-        # 加载数据集
-        train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-        test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-        
-        # 划分训练集和验证集
-        train_size = int(self.config.train_ratio * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
-        
-        # 创建数据加载器
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-        self.test_loader = DataLoader(
-            test_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-    
     def print_model_summary(self):
         """打印模型结构"""
-        try:
-            from torchinfo import summary
-            print("\nDetailed Model Summary:")
-            summary(self.model, 
-                    input_size=(self.config.batch_size, 1, 28, 28),
-                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
-                    verbose=1)
-        except ImportError:
-            print("torchinfo 未安装，请使用: pip install torchinfo")
+        self.model.print_model_summary()
     
     def train_epoch(self, epoch):
         """训练一个epoch"""
@@ -245,7 +103,7 @@ class Trainer:
             images, labels = images.to(self.device), labels.to(self.device)
             
             # 混合精度训练
-            with autocast(enabled=self.config.use_amp):
+            with autocast(device_type=self.device.type, enabled=self.config.use_amp):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
             
@@ -316,7 +174,7 @@ class Trainer:
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
             'scaler': self.scaler.state_dict(),
-            'best_acc': self.best_val_acc
+            'best_acc': self.best_val_acc if hasattr(self, 'best_val_acc') else 0.0
         }
         
         filename = os.path.join(self.config.save_dir, f'{self.config.model_name}_last.pth')
@@ -330,7 +188,7 @@ class Trainer:
         """加载模型检查点"""
         filename = os.path.join(self.config.save_dir, f'{self.config.model_name}_last.pth')
         if os.path.exists(filename):
-            checkpoint = torch.load(filename)
+            checkpoint = torch.load(filename, weights_only=True)
             self.model.load_state_dict(checkpoint['state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.scheduler.load_state_dict(checkpoint['scheduler'])
@@ -365,7 +223,6 @@ class Trainer:
             if val_acc > self.best_val_acc:
                 self.best_val_acc = val_acc
                 self.save_checkpoint(epoch, is_best=True)
-                print(f"New best validation accuracy: {val_acc:.2f}%")
             
             # 保存最新模型
             self.save_checkpoint(epoch)
@@ -375,11 +232,16 @@ class Trainer:
             print(f'Epoch {epoch+1}/{self.config.num_epochs} - '
                   f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
                   f'Val Acc: {val_acc:.2f}%, Time: {epoch_time:.2f}s')
+            
+            # 保存训练日志
+            with open(os.path.join(self.config.save_dir, 'training_log.txt'), 'a') as log_file:
+                log_file.write(f'Epoch {epoch+1}/{self.config.num_epochs} - '
+                               f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
+                               f'Val Acc: {val_acc:.2f}%, Time: {epoch_time:.2f}s\n')
         
         # 最终测试
         test_acc = self.test()
         print(f'\nFinal Test Accuracy: {test_acc:.2f}%')
-        print(f'Best Validation Accuracy: {self.best_val_acc:.2f}%')
         
         # 保存训练历史
         history = {
@@ -394,9 +256,30 @@ class Trainer:
         return history
 
 def main():
-    config = Config()
+    config = Config.from_yaml('configs/norm_transformer_config.yaml')
     trainer = Trainer(config)
     history = trainer.train()
+    # filename = os.path.join('checkpoints', f'{trainer.config.model_name}_best.pth')
+    # if os.path.exists(filename):
+    #     checkpoint = torch.load(filename, weights_only=True)
+    #     print(checkpoint['state_dict'].keys())
+    #     trainer.model.load_state_dict(checkpoint['state_dict'])
+    #     trainer.optimizer.load_state_dict(checkpoint['optimizer'])
+    #     trainer.scheduler.load_state_dict(checkpoint['scheduler'])
+    #     trainer.scaler.load_state_dict(checkpoint['scaler'])
+    # trainer.model.eval()
+    # test_correct = 0
+    # test_total = 0
+    
+    # with torch.no_grad():
+    #     for images, labels in tqdm(trainer.test_loader, desc='Testing'):
+    #         images, labels = images.to(trainer.device), labels.to(trainer.device)
+    #         outputs = trainer.model(images)
+    #         _, predicted = outputs.max(1)
+    #         test_total += labels.size(0)
+    #         test_correct += predicted.eq(labels).sum().item()
+        
+    # print(100. * test_correct / test_total)
 
 if __name__ == '__main__':
     main()

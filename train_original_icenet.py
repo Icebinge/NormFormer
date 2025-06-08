@@ -3,94 +3,39 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+import time
 import numpy as np
 from tqdm import tqdm
-import time
 import os
-from torch.cuda.amp import GradScaler, autocast
-from normformer import EncoderLayer
-from normActive import RowNormActivation
+from torch.amp import GradScaler, autocast
+import math
+import yaml
+from dataclasses import dataclass
+from typing import Dict, Any
+from datasets.mnist_dataset import MNISTDataset
+from models.original_transformer import OriginalTransformerNet
 
+@dataclass
 class Config:
-    """集中管理所有超参数"""
-    seed = 42
-    num_classes = 10
-    d_model = 256
-    num_heads = 8
-    num_layers = 4
-    d_ff = 1024
-    dropout = 0.1
-    patch_size = 7
+    """配置参数类"""
+    model: Dict[str, Any]
+    training: Dict[str, Any]
+    system: Dict[str, Any]
+    save: Dict[str, Any]
     
-    batch_size = 128
-    num_epochs = 100
-    learning_rate = 0.001
-    weight_decay = 1e-4
-    max_grad_norm = 1.0
+    @classmethod
+    def from_yaml(cls, yaml_path: str) -> 'Config':
+        """从YAML文件加载配置"""
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            config_dict = yaml.safe_load(f)
+        return cls(**config_dict)
     
-    train_ratio = 0.9
-    num_workers = 4
-    use_amp = True  # 自动混合精度训练
-    
-    save_dir = "icenet_checkpoints"
-    model_name = "transformer_mnist"
-
-class SimpleTransformerNet(nn.Module):
-    def __init__(self, config):
-        super(SimpleTransformerNet, self).__init__()
-        self.config = config
-        
-        # 图像预处理层
-        self.patch_embed = nn.Conv2d(1, config.d_model, 
-                                    kernel_size=config.patch_size, 
-                                    stride=config.patch_size)
-        
-        # 位置编码
-        num_patches = (28 // config.patch_size) ** 2
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, config.d_model))
-        
-        # Transformer 编码器 (使用之前修改后的纯编码器版本)
-        self.transformer = nn.Sequential(*[
-            EncoderLayer(config.d_model, config.num_heads, config.d_ff, config.dropout)
-            for _ in range(config.num_layers)
-        ])
-        
-        # 分类头
-        self.classifier = nn.Sequential(
-            # nn.LayerNorm(config.d_model),
-            RowNormActivation(),
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_model, config.num_classes)
-        )
-        
-        self._init_weights()
-        
-    def _init_weights(self):
-        """初始化权重"""
-        nn.init.xavier_uniform_(self.patch_embed.weight)
-        nn.init.normal_(self.pos_embed, std=0.02)
-        
-    def forward(self, x):
-        # 输入 x: (batch_size, 1, 28, 28)
-        batch_size = x.shape[0]
-        
-        # 图像分块
-        x = self.patch_embed(x)  # (batch_size, d_model, 4, 4)
-        x = x.flatten(2).transpose(1, 2)  # (batch_size, num_patches, d_model)
-        
-        # 添加位置编码
-        x = x + self.pos_embed
-        
-        # 通过Transformer编码器
-        x = self.transformer(x)
-        
-        # 全局平均池化
-        x = x.mean(dim=1)
-        
-        # 分类
-        return self.classifier(x)
+    def __getattr__(self, name: str) -> Any:
+        """允许直接访问配置项"""
+        for section in [self.model, self.training, self.system, self.save]:
+            if name in section:
+                return section[name]
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 class Trainer:
     def __init__(self, config, device=None):
@@ -101,10 +46,14 @@ class Trainer:
         self._set_seed()
         
         # 准备数据
-        self._prepare_data()
+        data_loader = MNISTDataset(config)
+        loaders = data_loader.get_data_loaders()
+        self.train_loader = loaders['train']
+        self.val_loader = loaders['val']
+        self.test_loader = loaders['test']
         
         # 初始化模型
-        self.model = SimpleTransformerNet(config).to(self.device)
+        self.model = OriginalTransformerNet(config).to(self.device)
         
         # 打印模型结构
         self.print_model_summary()
@@ -124,11 +73,13 @@ class Trainer:
         )
         
         # 混合精度训练
-        self.scaler = GradScaler(enabled=config.use_amp)
+        self.scaler = GradScaler(enabled=self.config.use_amp)
         
         # 创建保存目录
         os.makedirs(config.save_dir, exist_ok=True)
         
+        print(f"当前设备: {self.device}")
+    
     def _set_seed(self):
         """设置随机种子"""
         torch.manual_seed(self.config.seed)
@@ -136,56 +87,9 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.config.seed)
     
-    def _prepare_data(self):
-        """准备数据集"""
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,))
-        ])
-        
-        # 加载数据集
-        train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-        test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-        
-        # 划分训练集和验证集
-        train_size = int(self.config.train_ratio * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
-        
-        # 创建数据加载器
-        self.train_loader = DataLoader(
-            train_dataset, 
-            batch_size=self.config.batch_size, 
-            shuffle=True, 
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-        self.val_loader = DataLoader(
-            val_dataset, 
-            batch_size=self.config.batch_size, 
-            shuffle=False, 
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-        self.test_loader = DataLoader(
-            test_dataset, 
-            batch_size=self.config.batch_size, 
-            shuffle=False, 
-            num_workers=self.config.num_workers,
-            pin_memory=True
-        )
-    
     def print_model_summary(self):
         """打印模型结构"""
-        try:
-            from torchinfo import summary
-            print("\nDetailed Model Summary:")
-            summary(self.model, 
-                    input_size=(self.config.batch_size, 1, 28, 28),
-                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
-                    verbose=1)
-        except ImportError:
-            print("torchinfo not installed, install with: pip install torchinfo")
+        self.model.print_model_summary()
     
     def train_epoch(self, epoch):
         """训练一个epoch"""
@@ -199,7 +103,7 @@ class Trainer:
             images, labels = images.to(self.device), labels.to(self.device)
             
             # 混合精度训练
-            with autocast(enabled=self.config.use_amp):
+            with autocast(device_type=self.device.type, enabled=self.config.use_amp):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
             
@@ -284,7 +188,7 @@ class Trainer:
         """加载模型检查点"""
         filename = os.path.join(self.config.save_dir, f'{self.config.model_name}_last.pth')
         if os.path.exists(filename):
-            checkpoint = torch.load(filename)
+            checkpoint = torch.load(filename, weights_only=True)
             self.model.load_state_dict(checkpoint['state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.scheduler.load_state_dict(checkpoint['scheduler'])
@@ -319,6 +223,7 @@ class Trainer:
             if val_acc > self.best_val_acc:
                 self.best_val_acc = val_acc
                 self.save_checkpoint(epoch, is_best=True)
+                print(f"New best validation accuracy: {val_acc:.2f}%")
             
             # 保存最新模型
             self.save_checkpoint(epoch)
@@ -328,10 +233,17 @@ class Trainer:
             print(f'Epoch {epoch+1}/{self.config.num_epochs} - '
                   f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
                   f'Val Acc: {val_acc:.2f}%, Time: {epoch_time:.2f}s')
+            
+            # 保存训练日志
+            with open(os.path.join(self.config.save_dir, 'training_log.txt'), 'a') as log_file:
+                log_file.write(f'Epoch {epoch+1}/{self.config.num_epochs} - '
+                               f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
+                               f'Val Acc: {val_acc:.2f}%, Time: {epoch_time:.2f}s\n')
         
         # 最终测试
         test_acc = self.test()
         print(f'\nFinal Test Accuracy: {test_acc:.2f}%')
+        print(f'Best Validation Accuracy: {self.best_val_acc:.2f}%')
         
         # 保存训练历史
         history = {
@@ -346,10 +258,9 @@ class Trainer:
         return history
 
 def main():
-    config = Config()
+    config = Config.from_yaml('configs/original_transformer_config.yaml')
     trainer = Trainer(config)
     history = trainer.train()
-    # trainer.print_model_summary()
 
 if __name__ == '__main__':
     main()

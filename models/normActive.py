@@ -13,7 +13,7 @@ class RowNormActivation(nn.Module):
     def forward(self, x):
         # Calculate L2 norm for each row
         # Keep dimensions for broadcasting
-        norm = torch.norm(x, p=2, dim=1, keepdim=True)
+        norm = torch.norm(x, p=2, dim=-1, keepdim=True)
         # Add small epsilon to prevent division by zero
         norm = norm + self.eps
         # Normalize each row

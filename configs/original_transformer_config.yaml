@@ -1,0 +1,29 @@
+# Model Parameters
+model:
+  num_classes: 10
+  d_model: 256
+  num_heads: 8
+  num_layers: 2
+  d_ff: 1024
+  dropout: 0.1
+  patch_size: 7
+
+# Training Parameters
+training:
+  batch_size: 128
+  num_epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  max_grad_norm: 1.0
+  train_ratio: 0.9
+
+# System Parameters
+system:
+  seed: 42
+  num_workers: 4
+  use_amp: true  # Automatic Mixed Precision training
+
+# Save Parameters
+save:
+  save_dir: "original_checkpoints"
+  model_name: "original_transformer_mnist" 

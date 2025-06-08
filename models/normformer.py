@@ -2,18 +2,14 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from normActive import RowNormActivation
+from models.normActive import RowNormActivation
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        # 使用可学习的位置编码参数
+        self.pe = nn.Parameter(torch.zeros(1, max_len, d_model))
+        nn.init.normal_(self.pe, std=0.02)  # 使用与原始Transformer相同的初始化方式
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
@@ -38,18 +34,13 @@ class MultiHeadAttention(nn.Module):
     def scaled_dot_product_attention(self, Q, K, V):
         # Q, K, V shape: (batch_size, num_heads, seq_len, d_k)
         
-        # Reshape for normalization
-        batch_size, num_heads, seq_len, d_k = Q.shape
-        Q_reshaped = Q.reshape(-1, d_k)  # (batch_size * num_heads * seq_len, d_k)
-        K_reshaped = K.reshape(-1, d_k)  # (batch_size * num_heads * seq_len, d_k)
-        
         # Normalize using RowNormActivation
-        Q_norm = self.norm_activation(Q_reshaped).view(batch_size, num_heads, seq_len, d_k)
-        K_norm = self.norm_activation(K_reshaped).view(batch_size, num_heads, seq_len, d_k)
+        Q_norm = self.norm_activation(Q)
+        K_norm = self.norm_activation(K)
         
         # Compute attention scores
         scores = torch.matmul(Q_norm, K_norm.transpose(-2, -1))
-        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = scores ** 2  # Replace softmax with square operation
         attention_weights = self.dropout(attention_weights)
         
         output = torch.matmul(attention_weights, V)
@@ -80,7 +71,8 @@ class FeedForward(nn.Module):
         
     def forward(self, x):
         x = self.linear1(x)
-        x = self.norm_activation(x)
+        # x = self.norm_activation(x)
+        x = F.gelu(x)
         x = self.dropout(x)
         return self.linear2(x)
 
@@ -91,32 +83,42 @@ class EncoderLayer(nn.Module):
         self.feed_forward = FeedForward(d_model, d_ff, dropout)
         self.dropout = nn.Dropout(dropout)
         self.norm_activation = RowNormActivation()
+        self.norm1 = nn.LayerNorm(d_model)
         
     def forward(self, x):
         # Self attention
         attn_output = self.self_attn(x, x, x)
         x = x + self.dropout(attn_output)
-        x = self.norm_activation(x)
+        # x = self.norm_activation(x)
+        x = self.norm1(x)
         
         # Feed forward
         ff_output = self.feed_forward(x)
         x = x + self.dropout(ff_output)
-        x = self.norm_activation(x)
+        # x = self.norm_activation(x)
+        x = self.norm1(x)
         
         return x
 
 class Transformer(nn.Module):
-    def __init__(self, src_vocab_size, d_model=512, num_heads=8,
-                 num_encoder_layers=6, d_ff=2048, dropout=0.1):
+    def __init__(self, d_model=512, num_heads=8,
+                 num_encoder_layers=6, d_ff=2048, dropout=0.1,
+                 patch_size=7):
         super(Transformer, self).__init__()
         
         self.d_model = d_model
         
-        # Embeddings
-        self.src_embedding = nn.Embedding(src_vocab_size, d_model)
-        self.positional_encoding = PositionalEncoding(d_model)
-        self.norm_activation = RowNormActivation()
+        # 图像预处理层
+        self.patch_embed = nn.Conv2d(
+            1, d_model, 
+            kernel_size=patch_size, 
+            stride=patch_size
+        )
         
+        # 位置编码
+        num_patches = (28 // patch_size) ** 2
+        self.positional_encoding = PositionalEncoding(d_model, max_len=num_patches)
+        self.norm_activation = RowNormActivation()
         # Encoder
         self.encoder_layers = nn.ModuleList([
             EncoderLayer(d_model, num_heads, d_ff, dropout)
@@ -124,12 +126,29 @@ class Transformer(nn.Module):
         ])
         
         self.dropout = nn.Dropout(dropout)
+        # self._init_weights()
         
-    def forward(self, src):
-        # Encoder only
-        src_embedded = self.dropout(self.positional_encoding(self.src_embedding(src.long()) * math.sqrt(self.d_model)))
-        src_embedded = self.norm_activation(src_embedded)
-        enc_output = src_embedded
+    def _init_weights(self):
+        """初始化权重"""
+        nn.init.xavier_uniform_(self.patch_embed.weight)
+        
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        
+    def forward(self, x):
+        # 输入 x: (batch_size, 1, 28, 28)
+        batch_size = x.shape[0]
+        
+        # 图像分块
+        x = self.patch_embed(x)  # (batch_size, d_model, 4, 4)
+        x = x.flatten(2).transpose(1, 2)  # (batch_size, num_patches, d_model)
+        
+        # 添加位置编码
+        x = self.positional_encoding(x)
+        
+        # 通过编码器层
+        enc_output = x
         for enc_layer in self.encoder_layers:
             enc_output = enc_layer(enc_output)
             
