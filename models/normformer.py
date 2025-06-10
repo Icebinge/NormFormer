@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -67,11 +66,9 @@ class FeedForward(nn.Module):
         self.linear1 = nn.Linear(d_model, d_ff)
         self.linear2 = nn.Linear(d_ff, d_model)
         self.dropout = nn.Dropout(dropout)
-        self.norm_activation = RowNormActivation()
         
     def forward(self, x):
         x = self.linear1(x)
-        # x = self.norm_activation(x)
         x = F.gelu(x)
         x = self.dropout(x)
         return self.linear2(x)
@@ -82,20 +79,17 @@ class EncoderLayer(nn.Module):
         self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
         self.feed_forward = FeedForward(d_model, d_ff, dropout)
         self.dropout = nn.Dropout(dropout)
-        self.norm_activation = RowNormActivation()
         self.norm1 = nn.LayerNorm(d_model)
         
     def forward(self, x):
         # Self attention
         attn_output = self.self_attn(x, x, x)
         x = x + self.dropout(attn_output)
-        # x = self.norm_activation(x)
         x = self.norm1(x)
         
         # Feed forward
         ff_output = self.feed_forward(x)
         x = x + self.dropout(ff_output)
-        # x = self.norm_activation(x)
         x = self.norm1(x)
         
         return x
@@ -118,27 +112,14 @@ class Transformer(nn.Module):
         # 位置编码
         num_patches = (28 // patch_size) ** 2
         self.positional_encoding = PositionalEncoding(d_model, max_len=num_patches)
-        self.norm_activation = RowNormActivation()
         # Encoder
         self.encoder_layers = nn.ModuleList([
             EncoderLayer(d_model, num_heads, d_ff, dropout)
             for _ in range(num_encoder_layers)
         ])
         
-        self.dropout = nn.Dropout(dropout)
-        # self._init_weights()
-        
-    def _init_weights(self):
-        """初始化权重"""
-        nn.init.xavier_uniform_(self.patch_embed.weight)
-        
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-        
     def forward(self, x):
         # 输入 x: (batch_size, 1, 28, 28)
-        batch_size = x.shape[0]
         
         # 图像分块
         x = self.patch_embed(x)  # (batch_size, d_model, 4, 4)
@@ -153,23 +134,3 @@ class Transformer(nn.Module):
             enc_output = enc_layer(enc_output)
             
         return enc_output
-
-# Example usage
-if __name__ == "__main__":
-    # Create a small transformer for demonstration
-    src_vocab_size = 1000
-    d_model = 512
-    num_heads = 8
-    
-    transformer = Transformer(src_vocab_size, d_model, num_heads)
-    
-    # Create dummy input
-    batch_size = 2
-    src_seq_length = 10
-    
-    src = torch.randint(1, src_vocab_size, (batch_size, src_seq_length))
-    
-    # Forward pass
-    output = transformer(src)
-    print(f"Input shape: {src.shape}")
-    print(f"Output shape: {output.shape}")

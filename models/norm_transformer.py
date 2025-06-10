@@ -1,8 +1,6 @@
-import torch
 import torch.nn as nn
 from models.normformer import Transformer
-from models.normActive import RowNormActivation
-
+from torchinfo import summary
 class SimpleTransformerNet(nn.Module):
     def __init__(self, config):
         super(SimpleTransformerNet, self).__init__()
@@ -51,12 +49,8 @@ class SimpleTransformerNet(nn.Module):
 
     def print_model_summary(self):
         """打印模型结构"""
-        try:
-            from torchinfo import summary
-            print("\nDetailed Model Summary:")
-            summary(self, 
-                    input_size=(self.config.batch_size, 1, 28, 28),
-                    col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
-                    verbose=1)
-        except ImportError:
-            print("torchinfo 未安装，请使用: pip install torchinfo") 
+        print("\nDetailed Model Summary:")
+        summary(self, 
+                input_size=(self.config.batch_size, 1, 28, 28),
+                col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
+                verbose=1)
